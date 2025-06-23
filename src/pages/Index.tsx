@@ -1,10 +1,13 @@
-
 import { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Shield, Zap, Globe, Server, Download, Copy, AlertTriangle, CheckCircle, Clock, Eye } from "lucide-react";
+import { Shield, Zap, Globe, Server, Download, Copy, AlertTriangle, CheckCircle, Clock, Eye, FileText } from "lucide-react";
+import jsPDF from 'jspdf';
+import { useToast } from "@/hooks/use-toast";
 
-// Backend API constant
-const BACKEND_URL = "http://localhost:5000"; // Replace with your actual backend URL in prod
+// Backend API constant - Updated to be more flexible
+const BACKEND_URL = process.env.NODE_ENV === 'production' 
+  ? "https://your-backend-domain.com" // Replace with your actual backend URL
+  : "http://localhost:5000";
 
 interface ScanResult {
   port?: string;
@@ -23,6 +26,8 @@ const Index = () => {
   const [isScanning, setIsScanning] = useState(false);
   const [scanResults, setScanResults] = useState<ScanResult[]>([]);
   const [lastScanInfo, setLastScanInfo] = useState<{type: string, target: string, timestamp: Date} | null>(null);
+  const [backendConnected, setBackendConnected] = useState(false);
+  const { toast } = useToast();
 
   const handleScan = async () => {
     if (!target.trim()) return;
@@ -31,6 +36,10 @@ const Index = () => {
     setScanResults([]);
     
     try {
+      // Try to connect to backend with timeout
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 second timeout
+      
       const response = await fetch(`${BACKEND_URL}/scan`, {
         method: 'POST',
         headers: {
@@ -39,8 +48,11 @@ const Index = () => {
         body: JSON.stringify({
           target: target.trim(),
           type: scanType
-        })
+        }),
+        signal: controller.signal
       });
+      
+      clearTimeout(timeoutId);
       
       if (!response.ok) {
         throw new Error(`HTTP error! status: ${response.status}`);
@@ -48,16 +60,32 @@ const Index = () => {
       
       const data = await response.json();
       setScanResults(data.result || []);
+      setBackendConnected(true);
       setLastScanInfo({
         type: scanType,
         target: target.trim(),
         timestamp: new Date()
       });
+      
+      toast({
+        title: "Scan completed",
+        description: `Found ${data.result?.length || 0} results`,
+      });
+      
     } catch (error) {
       console.error('Scan failed:', error);
-      // Demo data for development
+      
+      // Show warning about demo mode
+      toast({
+        title: "Backend unavailable",
+        description: "Using demo data. Connect your backend for real scans.",
+        variant: "destructive"
+      });
+      
+      // Use demo data as fallback
       const demoResults = generateDemoResults(scanType);
       setScanResults(demoResults);
+      setBackendConnected(false);
       setLastScanInfo({
         type: scanType,
         target: target.trim(),
@@ -120,6 +148,10 @@ const Index = () => {
 
   const copyToClipboard = (text: string) => {
     navigator.clipboard.writeText(text);
+    toast({
+      title: "Copied to clipboard",
+      description: "Scan results copied successfully",
+    });
   };
 
   const downloadResults = () => {
@@ -131,6 +163,98 @@ const Index = () => {
     link.download = `scan-results-${scanType}-${Date.now()}.json`;
     link.click();
     URL.revokeObjectURL(url);
+    
+    toast({
+      title: "Download started",
+      description: "JSON file has been downloaded",
+    });
+  };
+
+  const downloadPDF = () => {
+    if (!lastScanInfo || scanResults.length === 0) {
+      toast({
+        title: "No data to export",
+        description: "Please run a scan first",
+        variant: "destructive"
+      });
+      return;
+    }
+
+    const pdf = new jsPDF();
+    const pageWidth = pdf.internal.pageSize.getWidth();
+    const margin = 20;
+    let yPosition = margin;
+
+    // Add title
+    pdf.setFontSize(20);
+    pdf.text('SecureScan Report', margin, yPosition);
+    yPosition += 15;
+
+    // Add scan info
+    pdf.setFontSize(12);
+    pdf.text(`Target: ${lastScanInfo.target}`, margin, yPosition);
+    yPosition += 10;
+    pdf.text(`Scan Type: ${lastScanInfo.type.toUpperCase()}`, margin, yPosition);
+    yPosition += 10;
+    pdf.text(`Timestamp: ${lastScanInfo.timestamp.toLocaleString()}`, margin, yPosition);
+    yPosition += 10;
+    pdf.text(`Backend Status: ${backendConnected ? 'Connected' : 'Demo Mode'}`, margin, yPosition);
+    yPosition += 20;
+
+    // Add results
+    pdf.setFontSize(16);
+    pdf.text('Scan Results:', margin, yPosition);
+    yPosition += 15;
+
+    pdf.setFontSize(10);
+    scanResults.forEach((result, index) => {
+      // Check if we need a new page
+      if (yPosition > 250) {
+        pdf.addPage();
+        yPosition = margin;
+      }
+
+      pdf.text(`${index + 1}.`, margin, yPosition);
+      
+      if (scanType === 'nmap') {
+        pdf.text(`Port: ${result.port || 'N/A'}`, margin + 10, yPosition);
+        yPosition += 8;
+        pdf.text(`State: ${result.state || 'N/A'}`, margin + 10, yPosition);
+        yPosition += 8;
+        pdf.text(`Service: ${result.service || 'N/A'}`, margin + 10, yPosition);
+      } else if (scanType === 'nuclei') {
+        pdf.text(`Title: ${result.title || 'N/A'}`, margin + 10, yPosition);
+        yPosition += 8;
+        pdf.text(`Severity: ${result.severity || 'N/A'}`, margin + 10, yPosition);
+        yPosition += 8;
+        pdf.text(`URL: ${result.url || 'N/A'}`, margin + 10, yPosition);
+        yPosition += 8;
+        // Handle long descriptions
+        const description = result.description || 'N/A';
+        const splitDescription = pdf.splitTextToSize(description, pageWidth - margin * 2 - 10);
+        pdf.text(splitDescription, margin + 10, yPosition);
+        yPosition += splitDescription.length * 5;
+      } else if (scanType === 'nikto') {
+        pdf.text(`Endpoint: ${result.endpoint || 'N/A'}`, margin + 10, yPosition);
+        yPosition += 8;
+        // Handle long descriptions
+        const description = result.description || 'N/A';
+        const splitDescription = pdf.splitTextToSize(description, pageWidth - margin * 2 - 10);
+        pdf.text(splitDescription, margin + 10, yPosition);
+        yPosition += splitDescription.length * 5;
+      }
+      
+      yPosition += 10;
+    });
+
+    // Save the PDF
+    const fileName = `securescan-report-${scanType}-${lastScanInfo.target}-${Date.now()}.pdf`;
+    pdf.save(fileName);
+    
+    toast({
+      title: "PDF downloaded",
+      description: "Scan report has been exported as PDF",
+    });
   };
 
   const getSeverityColor = (severity: string) => {
@@ -180,6 +304,13 @@ const Index = () => {
           <p className="text-white/60 text-lg max-w-2xl mx-auto">
             Advanced security scanning platform powered by Nmap, Nuclei, and Nikto
           </p>
+          {/* Backend status indicator */}
+          <div className="mt-4 flex items-center justify-center gap-2">
+            <div className={`w-2 h-2 rounded-full ${backendConnected ? 'bg-green-400' : 'bg-yellow-400'}`} />
+            <span className="text-sm text-white/60">
+              {backendConnected ? 'Backend Connected' : 'Demo Mode'}
+            </span>
+          </div>
         </motion.div>
 
         {/* Scan Input Form */}
@@ -309,6 +440,15 @@ const Index = () => {
                         title="Download JSON"
                       >
                         <Download className="w-4 h-4" />
+                      </motion.button>
+                      <motion.button
+                        onClick={downloadPDF}
+                        whileHover={{ scale: 1.05 }}
+                        whileTap={{ scale: 0.95 }}
+                        className="p-2 bg-gradient-to-r from-red-600 to-pink-600 hover:from-red-500 hover:to-pink-500 rounded-lg text-white transition-all shadow-lg shadow-red-500/25"
+                        title="Download PDF Report"
+                      >
+                        <FileText className="w-4 h-4" />
                       </motion.button>
                     </div>
                   )}
